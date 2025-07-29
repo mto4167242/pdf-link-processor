@@ -1,4 +1,4 @@
-<!-- FILE: templates/index.html (Final, Robusto Streaming Version) -->
+<!-- FILE: templates/index.html (Final, Robusto Single-Route Streaming) -->
 <!DOCTYPE html>
 <html lang="en" data-theme="light">
 <head>
@@ -20,7 +20,7 @@
         <main>
             <article class="form-box">
                 <header><h2>Analyze PDF Links Fast and Easy</h2></header>
-                <form id="process-form" method="post" enctype="multipart/form-data" action="/process">
+                <form id="process-form" action="/process" method="post" enctype="multipart/form-data">
                     <fieldset id="form-fieldset">
                         <label for="pdf_file_input" class="file-upload-wrapper"><span role="button">Choose a PDF File</span><div id="filename-display">No file selected</div></label>
                         <input type="file" name="pdf_file" id="pdf_file_input" required>
@@ -59,7 +59,7 @@ no items found that match</textarea></label>
         const themeToggle = document.getElementById('theme-toggle'); const themeIcon = themeToggle.querySelector('.material-symbols-outlined'); const htmlElement = document.documentElement; function setTheme(theme) { htmlElement.setAttribute('data-theme', theme); themeIcon.textContent = theme === 'dark' ? 'light_mode' : 'dark_mode'; localStorage.setItem('theme', theme); } themeToggle.addEventListener('click', () => { const currentTheme = htmlElement.getAttribute('data-theme'); setTheme(currentTheme === 'dark' ? 'light' : 'dark'); }); const savedTheme = localStorage.getItem('theme') || 'light'; setTheme(savedTheme);
         const fileInput = document.getElementById('pdf_file_input'); const filenameDisplay = document.getElementById('filename-display'); fileInput.addEventListener('change', () => { if (fileInput.files.length > 0) { filenameDisplay.textContent = fileInput.files[0].name; } else { filenameDisplay.textContent = 'No file selected'; } });
 
-        // --- NEW: Simplified SSE Form Submission ---
+        // --- NEW: Robusto Single-Route SSE Form Submission ---
         const form = document.getElementById('process-form');
         const formFieldset = document.getElementById('form-fieldset');
         const cancelButton = document.getElementById('cancel-button');
@@ -67,7 +67,7 @@ no items found that match</textarea></label>
         const progressBar = document.getElementById('progress-bar');
         const progressText = document.getElementById('progress-text');
         const resultsContainer = document.getElementById('results-container');
-        let eventSource;
+        let controller; // To abort the fetch request
 
         form.addEventListener('submit', function(e) {
             e.preventDefault();
@@ -75,42 +75,69 @@ no items found that match</textarea></label>
             formFieldset.disabled = true;
             resultsSection.style.display = 'block';
             resultsContainer.innerHTML = '';
-            progressText.textContent = 'Starting process...';
+            progressText.textContent = 'Uploading and starting process...';
             progressBar.removeAttribute('value');
+            controller = new AbortController();
 
-            // The EventSource URL will now be the same as the form's action
-            eventSource = new EventSource(form.action + '?' + new URLSearchParams(new FormData(form)).toString());
+            fetch(form.action, {
+                method: 'POST',
+                body: new FormData(form),
+                signal: controller.signal
+            }).then(response => {
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
 
-            eventSource.onmessage = function(event) {
-                const data = JSON.parse(event.data);
-                progressBar.setAttribute('value', data.progress);
-                progressBar.setAttribute('max', data.total);
-                progressText.textContent = data.message;
-            };
+                function processStream() {
+                    reader.read().then(({ done, value }) => {
+                        if (done) { 
+                            formFieldset.disabled = false;
+                            return; 
+                        }
+                        
+                        const chunk = decoder.decode(value, { stream: true });
+                        const events = chunk.split('\n\n');
 
-            eventSource.addEventListener('complete', function(event) {
-                resultsContainer.innerHTML = event.data;
-                progressText.textContent = 'All tasks complete.';
-                eventSource.close();
-                formFieldset.disabled = false;
-            });
-
-            eventSource.addEventListener('error', function(event) {
-                // This now handles both connection errors and custom server errors
-                const errorMessage = event.data ? `<strong>Error:</strong> ${event.data}` : "An unknown error occurred with the connection.";
-                resultsContainer.innerHTML = `<p style="color:red;">${errorMessage}</p>`;
-                progressText.textContent = 'Failed.';
-                progressBar.setAttribute('value', '0');
-                eventSource.close();
+                        events.forEach(eventData => {
+                            if (!eventData.trim()) return;
+                            
+                            let eventType = 'message'; let data = eventData;
+                            if (eventData.startsWith('event: ')) { eventType = eventData.split('\n')[0].substring(7).trim(); data = eventData.substring(eventData.indexOf('\n') + 1); }
+                            if (data.startsWith('data: ')) { data = data.substring(6).trim(); }
+                            
+                            if (eventType === 'message') {
+                                const jsonData = JSON.parse(data);
+                                progressBar.setAttribute('value', jsonData.progress);
+                                progressBar.setAttribute('max', jsonData.total);
+                                progressText.textContent = jsonData.message;
+                            } else if (eventType === 'complete') {
+                                resultsContainer.innerHTML = data;
+                                progressText.textContent = 'All tasks complete.';
+                                formFieldset.disabled = false;
+                            } else if (eventType === 'error') {
+                                resultsContainer.innerHTML = `<p style="color:red;"><strong>Error:</strong> ${data}</p>`;
+                                progressText.textContent = 'Failed.';
+                                progressBar.setAttribute('value', '0');
+                                formFieldset.disabled = false;
+                            }
+                        });
+                        processStream();
+                    });
+                }
+                processStream();
+            }).catch(err => {
+                if (err.name === 'AbortError') {
+                    progressText.textContent = 'Process canceled by user.';
+                } else {
+                    resultsContainer.innerHTML = `<p style="color:red;">A connection error occurred: ${err.message}</p>`;
+                }
                 formFieldset.disabled = false;
             });
         });
 
         cancelButton.addEventListener('click', function() {
-            if (eventSource) eventSource.close();
-            progressText.textContent = 'Process canceled by user.';
-            resultsContainer.innerHTML = '';
-            formFieldset.disabled = false;
+            if (controller) {
+                controller.abort();
+            }
         });
     </script>
 </body>

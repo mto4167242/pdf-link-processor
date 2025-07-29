@@ -1,4 +1,4 @@
-# --- FILE: app.py (Final, Robusto Streaming Version) ---
+# --- FILE: app.py (Final, Robusto Single-Route Streaming) ---
 
 from flask import Flask, render_template, request, Response
 import os
@@ -32,7 +32,7 @@ def index():
 
 @app.route('/process', methods=['POST'])
 def process():
-    # This single route now handles everything robustly
+    # This single route now handles the file upload and the streaming response
     job_id = str(uuid.uuid4()); job_folder = os.path.join(app.config['TEMP_FOLDER'], job_id); os.makedirs(job_folder)
     
     pdf_file = request.files.get('pdf_file')
@@ -50,34 +50,35 @@ def process():
             loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
             final_df = None; total_time = 0
 
-            # Consume the async generator from processing.py
-            async def consume_stream_wrapper():
-                nonlocal final_df, total_time
-                async for message in run_link_check_stream(source_path, keywords):
-                    if message.startswith("event: final_data"):
-                        data_json = message.split("data: ")[1].strip()
-                        final_data = json.loads(data_json)
-                        final_df = pd.read_json(final_data['dataframe'], orient='split')
-                        total_time = final_data['total_time']
-                    else:
-                        yield message
-            
-            # Yield from the async generator
-            for message in loop.run_until_complete(consume_and_yield(consume_stream_wrapper)):
-                yield message
+            # This helper function will bridge our async generator with the sync Flask world
+            async def consume_and_yield(async_gen):
+                async for item in async_gen:
+                    yield item
 
+            # We need another helper to run the async generator
+            def run_async_generator(gen):
+                async def runner():
+                    async for item in gen:
+                        yield item
+                return loop.run_until_complete(consume_and_yield(runner()))
+
+            for message in run_async_generator(run_link_check_stream(source_path, keywords)):
+                if message.startswith("event: final_data"):
+                    data_json = message.split("data: ")[1].strip()
+                    final_data = json.loads(data_json)
+                    final_df = pd.read_json(final_data['dataframe'], orient='split')
+                    total_time = final_data['total_time']
+                else:
+                    yield message
+            
             if final_df is not None:
                 final_html = generate_final_files_and_html(final_df, job_id, job_folder, source_path, pdf_file.filename, outputs_requested, highlight_color, total_time)
                 yield f"event: complete\ndata: {final_html}\n\n"
+
         except Exception as e:
             yield f"event: error\ndata: A critical error occurred during processing: {e}\n\n"
 
     return Response(event_stream(), mimetype='text/event-stream')
-
-async def consume_and_yield(async_gen):
-    # Helper to bridge the async generator with the sync Flask function
-    async for item in async_gen():
-        yield item
 
 def generate_final_files_and_html(df, job_id, job_folder, source_path, filename, outputs, color, total_time):
     # This function is unchanged and correct
