@@ -1,18 +1,20 @@
-# --- FILE: app.py (Final, Optimized, Single-Page Version) ---
+# --- FILE: app.py ---
 
-from flask import Flask, render_template, request, send_from_directory
+from flask import Flask, render_template, request, send_from_directory, Response, session
 import os
 import uuid
 import asyncio
 import zipfile
 import pandas as pd
-from processing import run_link_check, create_highlighted_pdf, extract_final_pdf
+import json
+from processing import run_link_check_stream, create_highlighted_pdf, extract_final_pdf
 
 app = Flask(__name__)
+app.secret_key = os.urandom(24) # Needed for session
 if not os.path.exists('temp_files'): os.makedirs('temp_files')
 app.config['TEMP_FOLDER'] = 'temp_files'
 
-# This helper function is still needed for the Excel reports, so it stays.
+# ... save_enhanced_excel_report function is unchanged ...
 def save_enhanced_excel_report(df, summary, excel_path):
     with pd.ExcelWriter(excel_path, engine='xlsxwriter') as writer:
         workbook = writer.book; summary_sheet = workbook.add_worksheet('Summary'); header_format = workbook.add_format({'bold': True, 'font_size': 14, 'align': 'left'}); bold_format = workbook.add_format({'bold': True})
@@ -30,69 +32,113 @@ def index():
     return render_template('index.html')
 
 @app.route('/process', methods=['POST'])
-def process():
-    job_id = str(uuid.uuid4()); job_folder = os.path.join(app.config['TEMP_FOLDER'], job_id); os.makedirs(job_folder)
-    uploaded_files = request.files.getlist('pdf_file')
-    if not uploaded_files or uploaded_files[0].filename == '': return "<article><h4>Error</h4><p>No files were selected. Please go back and choose a PDF to upload.</p></article>"
-    
-    keywords = [line.strip().lower() for line in request.form['keywords'].splitlines() if line.strip()]; outputs_requested = request.form.getlist('outputs'); highlight_color = request.form.get('highlight_color', 'Yellow')
-    
-    all_summaries = []; output_paths = []
-    
-    # Optimized loop: run check once, store results
-    all_results = []
-    for pdf_file in uploaded_files:
-        source_path = os.path.join(job_folder, pdf_file.filename); pdf_file.save(source_path)
-        df, summary = asyncio.run(run_link_check(source_path, keywords))
-        all_results.append({'df': df, 'summary': summary, 'base_filename': os.path.splitext(pdf_file.filename)[0], 'source_path': source_path})
-        all_summaries.append(summary)
+def process_setup():
+    job_id = str(uuid.uuid4())
+    job_folder = os.path.join(app.config['TEMP_FOLDER'], job_id)
+    os.makedirs(job_folder)
 
-    # Loop through stored results to generate files
-    for result in all_results:
-        summary = result['summary']
-        if summary['status'] != 'success': continue
+    pdf_file = request.files.get('pdf_file')
+    if not pdf_file or pdf_file.filename == '':
+        return Response(json.dumps({'error': 'No file selected'}), status=400, mimetype='application/json')
+    
+    source_path = os.path.join(job_folder, pdf_file.filename)
+    pdf_file.save(source_path)
+
+    session['job_id'] = job_id
+    session['source_path'] = source_path
+    session['filename'] = pdf_file.filename
+    session['keywords'] = request.args.get('keywords', '').splitlines()
+    session['outputs'] = request.args.getlist('outputs')
+    session['color'] = request.args.get('highlight_color', 'Yellow')
+
+    response = Response(status=200)
+    response.headers['X-Stream-Location'] = f'/stream/{job_id}'
+    return response
+
+@app.route('/stream/<job_id>')
+def stream(job_id):
+    def event_stream():
+        job_folder = os.path.join(app.config['TEMP_FOLDER'], job_id)
+        source_path = session.get('source_path')
+        keywords = session.get('keywords', [])
+        outputs = session.get('outputs', [])
+        color = session.get('color', 'Yellow')
+        filename = session.get('filename')
         
-        df = result['df']; base_filename = result['base_filename']; source_path = result['source_path']
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            final_df = None
+            total_time = 0
+
+            for message in loop.run_until_complete(consume_stream(source_path, keywords)):
+                if message.startswith("event: final_data"):
+                    data_json = message.split("data: ")[1].strip()
+                    final_data = json.loads(data_json)
+                    final_df = pd.read_json(final_data['dataframe'], orient='split')
+                    total_time = final_data['total_time']
+                else:
+                    yield message
+            
+            # --- NEW: Bulletproof Final Steps ---
+            if final_df is not None:
+                final_html = generate_final_files_and_html(final_df, job_id, job_folder, source_path, filename, outputs, color, total_time)
+                yield f"event: complete\ndata: {final_html}\n\n"
+            
+        except Exception as e:
+            # This is the new global error handler
+            error_message = f"A critical error occurred during processing: {e}"
+            yield f"event: error\ndata: {error_message}\n\n"
+
+    return Response(event_stream(), mimetype='text/event-stream')
+
+async def consume_stream(source_path, keywords):
+    messages = []
+    async for message in run_link_check_stream(source_path, keywords):
+        messages.append(message)
+    return messages
+
+def generate_final_files_and_html(df, job_id, job_folder, source_path, filename, outputs, color, total_time):
+    try:
+        output_paths = []
+        base_filename = os.path.splitext(filename)[0]
+
+        invalid_count = len(df) - int(df['valid'].sum())
+        summary = {
+            "filename": filename, "total_pages": int(df['page'].max()), "total_links": len(df),
+            "valid_links": int(df['valid'].sum()), "invalid_links": invalid_count,
+            "error_breakdown": df[df['valid'] == False]['reason'].value_counts().to_dict() if invalid_count > 0 else {}
+        }
         
-        if 'excel' in outputs_requested:
+        if 'excel' in outputs:
             excel_path = os.path.join(job_folder, f"{base_filename}_report.xlsx"); save_enhanced_excel_report(df, summary, excel_path); output_paths.append(excel_path)
 
         invalid_links = df[df['valid'] == False]['url'].tolist()
-        if not invalid_links: continue
+        if invalid_links:
+            highlighted_pdf_path = os.path.join(job_folder, f"{base_filename}_highlighted.pdf")
+            create_highlighted_pdf(source_path, highlighted_pdf_path, invalid_links, color)
+            if 'highlighted' in outputs: output_paths.append(highlighted_pdf_path)
+            if 'extracted' in outputs:
+                extracted_path = os.path.join(job_folder, f"{base_filename}_extracted.pdf"); 
+                if extract_final_pdf(highlighted_pdf_path, extracted_path, sort_by_count=False) > 0: output_paths.append(extracted_path)
+            if 'sorted' in outputs:
+                sorted_path = os.path.join(job_folder, f"{base_filename}_sorted.pdf"); 
+                if extract_final_pdf(highlighted_pdf_path, sorted_path, sort_by_count=True) > 0: output_paths.append(sorted_path)
 
-        highlighted_pdf_path = os.path.join(job_folder, f"{base_filename}_highlighted.pdf")
-        if 'highlighted' in outputs_requested or 'extracted' in outputs_requested or 'sorted' in outputs_requested:
-             create_highlighted_pdf(source_path, highlighted_pdf_path, invalid_links, highlight_color)
-             if 'highlighted' in outputs_requested: output_paths.append(highlighted_pdf_path)
-
-        if 'extracted' in outputs_requested:
-            extracted_path = os.path.join(job_folder, f"{base_filename}_extracted.pdf"); 
-            if extract_final_pdf(highlighted_pdf_path, extracted_path, sort_by_count=False) > 0: output_paths.append(extracted_path)
-        if 'sorted' in outputs_requested:
-            sorted_path = os.path.join(job_folder, f"{base_filename}_sorted.pdf"); 
-            if extract_final_pdf(highlighted_pdf_path, sorted_path, sort_by_count=True) > 0: output_paths.append(sorted_path)
-
-    # --- THIS IS THE KEY CHANGE ---
-    # Generate the simple HTML response without the table
-    final_html = "<h4>Processing Notes</h4>"
-    for s in all_summaries:
-        final_html += f"<p><strong>{s.get('filename', 'File')}:</strong> {s.get('message', 'An unknown error occurred.')}</p>"
-
-    if output_paths:
-        zip_filename = f"PDF_Results_{job_id[:8]}.zip"
-        zip_path = os.path.join(app.config['TEMP_FOLDER'], zip_filename)
-        with zipfile.ZipFile(zip_path, 'w') as zipf:
-            for file_path in output_paths:
-                zipf.write(file_path, os.path.basename(file_path))
-        final_html += f'<hr><a href="/download/{zip_filename}" role="button">Download All Results (.zip)</a>'
-    else:
-        final_html += "<hr><p>No output files were generated based on your selections or the content of the PDF(s).</p>"
+        final_html = f"<h4>Processing Complete!</h4><p>Finished checking {summary['total_links']} links in {total_time} seconds.</p>"
+        if output_paths:
+            zip_filename = f"PDF_Results_{job_id[:8]}.zip"; zip_path = os.path.join(app.config['TEMP_FOLDER'], zip_filename)
+            with zipfile.ZipFile(zip_path, 'w') as zipf:
+                for file_path in output_paths: zipf.write(file_path, os.path.basename(file_path))
+            final_html += f'<hr><a href="/download/{zip_filename}" role="button">Download All Results (.zip)</a>'
+        else:
+            final_html += "<hr><p>No output files were generated.</p>"
         
-    return f"<article>{final_html}</article>"
+        return f"<article>{final_html}</article>"
+    except Exception as e:
+        return f"<article><h4 style='color:red;'>Error During File Generation</h4><p>The link checking was successful, but an error occurred while creating the output files: {e}</p></article>"
 
 @app.route('/download/<filename>')
 def download_file(filename):
     return send_from_directory(app.config['TEMP_FOLDER'], filename, as_attachment=True)
-
-if __name__ == '__main__':
-    app.run(debug=True)
