@@ -1,6 +1,6 @@
-# --- FILE: app.py (Final, Corrected Streaming Version) ---
+# --- FILE: app.py (Final, Robusto Streaming Version) ---
 
-from flask import Flask, render_template, request, send_from_directory, Response
+from flask import Flask, render_template, request, Response
 import os
 import uuid
 import asyncio
@@ -32,6 +32,7 @@ def index():
 
 @app.route('/process', methods=['POST'])
 def process():
+    # This single route now handles everything robustly
     job_id = str(uuid.uuid4()); job_folder = os.path.join(app.config['TEMP_FOLDER'], job_id); os.makedirs(job_folder)
     
     pdf_file = request.files.get('pdf_file')
@@ -40,7 +41,6 @@ def process():
         return Response(error_stream(), mimetype='text/event-stream')
 
     source_path = os.path.join(job_folder, pdf_file.filename); pdf_file.save(source_path)
-    # Get other form data directly from the POST request
     keywords = [line.strip().lower() for line in request.form.get('keywords', '').splitlines() if line.strip()]
     outputs_requested = request.form.getlist('outputs')
     highlight_color = request.form.get('highlight_color', 'Yellow')
@@ -50,31 +50,37 @@ def process():
             loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
             final_df = None; total_time = 0
 
-            for message in loop.run_until_complete(consume_stream(source_path, keywords)):
-                if message.startswith("event: final_data"):
-                    data_json = message.split("data: ")[1].strip()
-                    final_data = json.loads(data_json)
-                    final_df = pd.read_json(final_data['dataframe'], orient='split')
-                    total_time = final_data['total_time']
-                else:
-                    yield message
+            # Consume the async generator from processing.py
+            async def consume_stream_wrapper():
+                nonlocal final_df, total_time
+                async for message in run_link_check_stream(source_path, keywords):
+                    if message.startswith("event: final_data"):
+                        data_json = message.split("data: ")[1].strip()
+                        final_data = json.loads(data_json)
+                        final_df = pd.read_json(final_data['dataframe'], orient='split')
+                        total_time = final_data['total_time']
+                    else:
+                        yield message
             
+            # Yield from the async generator
+            for message in loop.run_until_complete(consume_and_yield(consume_stream_wrapper)):
+                yield message
+
             if final_df is not None:
                 final_html = generate_final_files_and_html(final_df, job_id, job_folder, source_path, pdf_file.filename, outputs_requested, highlight_color, total_time)
                 yield f"event: complete\ndata: {final_html}\n\n"
         except Exception as e:
-            yield f"event: error\ndata: A critical error occurred: {e}\n\n"
+            yield f"event: error\ndata: A critical error occurred during processing: {e}\n\n"
 
     return Response(event_stream(), mimetype='text/event-stream')
 
-async def consume_stream(source_path, keywords):
-    messages = []
-    async for message in run_link_check_stream(source_path, keywords):
-        messages.append(message)
-    return messages
+async def consume_and_yield(async_gen):
+    # Helper to bridge the async generator with the sync Flask function
+    async for item in async_gen():
+        yield item
 
 def generate_final_files_and_html(df, job_id, job_folder, source_path, filename, outputs, color, total_time):
-    # This function is correct and unchanged
+    # This function is unchanged and correct
     try:
         output_paths = []; base_filename = os.path.splitext(filename)[0]
         invalid_count = len(df) - int(df['valid'].sum())

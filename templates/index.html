@@ -1,4 +1,4 @@
-<!-- FILE: templates/index.html (Final, Corrected Streaming Version) -->
+<!-- FILE: templates/index.html (Final, Robusto Streaming Version) -->
 <!DOCTYPE html>
 <html lang="en" data-theme="light">
 <head>
@@ -20,7 +20,7 @@
         <main>
             <article class="form-box">
                 <header><h2>Analyze PDF Links Fast and Easy</h2></header>
-                <form id="process-form" method="post" enctype="multipart/form-data">
+                <form id="process-form" method="post" enctype="multipart/form-data" action="/process">
                     <fieldset id="form-fieldset">
                         <label for="pdf_file_input" class="file-upload-wrapper"><span role="button">Choose a PDF File</span><div id="filename-display">No file selected</div></label>
                         <input type="file" name="pdf_file" id="pdf_file_input" required>
@@ -78,69 +78,39 @@ no items found that match</textarea></label>
             progressText.textContent = 'Starting process...';
             progressBar.removeAttribute('value');
 
-            // Use fetch to POST the form data directly to the streaming endpoint
-            fetch('/process', {
-                method: 'POST',
-                body: new FormData(form)
-            }).then(response => {
-                // The body of the response is our event stream
-                const reader = response.body.getReader();
-                const decoder = new TextDecoder();
+            // The EventSource URL will now be the same as the form's action
+            eventSource = new EventSource(form.action + '?' + new URLSearchParams(new FormData(form)).toString());
 
-                // Function to process the stream
-                function processStream() {
-                    reader.read().then(({ done, value }) => {
-                        if (done) { return; }
-                        
-                        // Decode and process the chunk of data
-                        const chunk = decoder.decode(value, { stream: true });
-                        const events = chunk.split('\n\n');
+            eventSource.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                progressBar.setAttribute('value', data.progress);
+                progressBar.setAttribute('max', data.total);
+                progressText.textContent = data.message;
+            };
 
-                        events.forEach(eventData => {
-                            if (!eventData.trim()) return;
-                            
-                            let eventType = 'message';
-                            let data = eventData;
-                            
-                            if (eventData.startsWith('event: ')) {
-                                eventType = eventData.split('\n')[0].substring(7).trim();
-                                data = eventData.substring(eventData.indexOf('\n') + 1);
-                            }
-                            if (data.startsWith('data: ')) {
-                                data = data.substring(6).trim();
-                            }
-                            
-                            // Manually dispatch events
-                            if (eventType === 'message') {
-                                const jsonData = JSON.parse(data);
-                                progressBar.setAttribute('value', jsonData.progress);
-                                progressBar.setAttribute('max', jsonData.total);
-                                progressText.textContent = jsonData.message;
-                            } else if (eventType === 'complete') {
-                                resultsContainer.innerHTML = data;
-                                progressText.textContent = 'All tasks complete.';
-                                formFieldset.disabled = false;
-                            } else if (eventType === 'error') {
-                                resultsContainer.innerHTML = `<p style="color:red;"><strong>Error:</strong> ${data}</p>`;
-                                progressText.textContent = 'Failed.';
-                                progressBar.setAttribute('value', '0');
-                                formFieldset.disabled = false;
-                            }
-                        });
+            eventSource.addEventListener('complete', function(event) {
+                resultsContainer.innerHTML = event.data;
+                progressText.textContent = 'All tasks complete.';
+                eventSource.close();
+                formFieldset.disabled = false;
+            });
 
-                        processStream(); // Continue reading the stream
-                    });
-                }
-                processStream();
-            }).catch(err => {
-                resultsContainer.innerHTML = `<p style="color:red;">A connection error occurred. Please try again.</p>`;
+            eventSource.addEventListener('error', function(event) {
+                // This now handles both connection errors and custom server errors
+                const errorMessage = event.data ? `<strong>Error:</strong> ${event.data}` : "An unknown error occurred with the connection.";
+                resultsContainer.innerHTML = `<p style="color:red;">${errorMessage}</p>`;
+                progressText.textContent = 'Failed.';
+                progressBar.setAttribute('value', '0');
+                eventSource.close();
                 formFieldset.disabled = false;
             });
         });
 
         cancelButton.addEventListener('click', function() {
-            // Canceling fetch streams is complex, a simple page reload is the most robust way
-            location.reload(); 
+            if (eventSource) eventSource.close();
+            progressText.textContent = 'Process canceled by user.';
+            resultsContainer.innerHTML = '';
+            formFieldset.disabled = false;
         });
     </script>
 </body>
