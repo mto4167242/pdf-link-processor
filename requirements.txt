@@ -1,0 +1,8 @@
+# requirements.txt (updated)
+flask
+PyMuPDF
+pandas
+openpyxl
+aiohttp
+gunicorn
+XlsxWriter

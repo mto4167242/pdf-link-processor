@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Processing Complete</title>
+    
+    <!-- Pico.css for base styling -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css"/>
+    
+    <!-- Google Material Icons -->
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" />
+
+    <!-- Custom Styles (Copied from index.html for consistency) -->
+    <style>
+        :root { --pico-primary: #334e99; --pico-primary-hover: #263a73; --pico-primary-focus: rgba(51, 78, 153, 0.25); --pico-primary-inverse: #fff; }
+        .container { max-width: 960px; }
+        .navbar { display: flex; justify-content: space-between; align-items: center; padding: 1rem 0; margin-bottom: 2rem; }
+        .navbar-brand { display: flex; align-items: center; gap: 1rem; font-weight: bold; font-size: 1.2rem; }
+        .navbar-brand img { height: 40px; }
+        #theme-toggle { display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; padding: 0; }
+        
+        /* Styles for the results box */
+        .results-box { text-align: center; }
+        .results-box ul { list-style: none; padding: 0; margin: 2rem 0; }
+        .results-box li { margin-bottom: 1rem; }
+        .results-box a[role="button"] { text-decoration: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Consistent Header -->
+        <header>
+            <nav class="navbar">
+                <div class="navbar-brand">
+                    <img src="/static/logo.png" alt="App Logo">
+                    <span>PDF Link Processor</span>
+                </div>
+                <button id="theme-toggle" class="secondary outline">
+                    <span class="material-symbols-outlined">light_mode</span>
+                </button>
+            </nav>
+        </header>
+
+        <!-- Main Content for Results -->
+        <main>
+            <article class="results-box">
+                <header>
+                    <h2>Processing Complete! <span style="color: #43a047;">✅</span></h2>
+                    <p>Your files are ready for download below.</p>
+                </header>
+                
+                <!-- Download Links -->
+                <ul>
+                    {% if files.excel_report %}
+                        <li><a href="/download/{{ files.excel_report }}" role="button">Download Link Status Report (Excel)</a></li>
+                    {% endif %}
+                    {% if files.highlighted_pdf %}
+                        <li><a href="/download/{{ files.highlighted_pdf }}" role="button">Download Highlighted PDF</a></li>
+                    {% endif %}
+                    {% if files.extracted_pdf %}
+                        <li><a href="/download/{{ files.extracted_pdf }}" role="button">Download Extracted PDF</a></li>
+                    {% endif %}
+                    {% if files.sorted_pdf %}
+                        <li><a href="/download/{{ files.sorted_pdf }}" role="button">Download Extracted & Sorted PDF</a></li>
+                    {% endif %}
+                </ul>
+
+                <footer>
+                    <a href="/" role="button" class="contrast">Process Another PDF</a>
+                </footer>
+            </article>
+        </main>
+    </div>
+
+    <!-- Consistent JavaScript -->
+    <script>
+        const themeToggle = document.getElementById('theme-toggle');
+        const themeIcon = themeToggle.querySelector('.material-symbols-outlined');
+        const htmlElement = document.documentElement;
+        function setTheme(theme) {
+            htmlElement.setAttribute('data-theme', theme);
+            themeIcon.textContent = theme === 'dark' ? 'light_mode' : 'dark_mode';
+            localStorage.setItem('theme', theme);
+        }
+        themeToggle.addEventListener('click', () => {
+            const currentTheme = htmlElement.getAttribute('data-theme');
+            setTheme(currentTheme === 'dark' ? 'light' : 'dark');
+        });
+        const savedTheme = localStorage.getItem('theme') || 'light';
+        setTheme(savedTheme);
+    </script>
+</body>
+</html>
