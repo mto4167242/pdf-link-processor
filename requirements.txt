@@ -1,4 +1,4 @@
-# requirements.txt (updated)
+# requirements.txt
 flask
 PyMuPDF
 pandas
@@ -6,3 +6,4 @@ openpyxl
 aiohttp
 gunicorn
 XlsxWriter
+Flask-Talisman
