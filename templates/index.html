@@ -1,4 +1,4 @@
-<!-- FILE: templates/index.html -->
+<!-- FILE: templates/index.html (Final, Corrected Streaming Version) -->
 <!DOCTYPE html>
 <html lang="en" data-theme="light">
 <head>
@@ -20,8 +20,8 @@
         <main>
             <article class="form-box">
                 <header><h2>Analyze PDF Links Fast and Easy</h2></header>
-                <form id="process-form">
-                    <fieldset id="form-fieldset"> <!-- NEW: Fieldset to easily disable the form -->
+                <form id="process-form" method="post" enctype="multipart/form-data">
+                    <fieldset id="form-fieldset">
                         <label for="pdf_file_input" class="file-upload-wrapper"><span role="button">Choose a PDF File</span><div id="filename-display">No file selected</div></label>
                         <input type="file" name="pdf_file" id="pdf_file_input" required>
                         <div class="grid">
@@ -44,7 +44,6 @@ no items found that match</textarea></label>
                 <article>
                     <header style="display:flex; justify-content:space-between; align-items:center;">
                         <h4>Processing Live Log</h4>
-                        <!-- NEW: Cancel Button -->
                         <button id="cancel-button" class="secondary outline">Cancel</button>
                     </header>
                     <progress id="progress-bar" value="0" max="100"></progress>
@@ -60,83 +59,88 @@ no items found that match</textarea></label>
         const themeToggle = document.getElementById('theme-toggle'); const themeIcon = themeToggle.querySelector('.material-symbols-outlined'); const htmlElement = document.documentElement; function setTheme(theme) { htmlElement.setAttribute('data-theme', theme); themeIcon.textContent = theme === 'dark' ? 'light_mode' : 'dark_mode'; localStorage.setItem('theme', theme); } themeToggle.addEventListener('click', () => { const currentTheme = htmlElement.getAttribute('data-theme'); setTheme(currentTheme === 'dark' ? 'light' : 'dark'); }); const savedTheme = localStorage.getItem('theme') || 'light'; setTheme(savedTheme);
         const fileInput = document.getElementById('pdf_file_input'); const filenameDisplay = document.getElementById('filename-display'); fileInput.addEventListener('change', () => { if (fileInput.files.length > 0) { filenameDisplay.textContent = fileInput.files[0].name; } else { filenameDisplay.textContent = 'No file selected'; } });
 
-        // --- NEW: Enhanced SSE Form Submission ---
+        // --- NEW: Simplified SSE Form Submission ---
         const form = document.getElementById('process-form');
         const formFieldset = document.getElementById('form-fieldset');
-        const submitButton = document.getElementById('submit-button');
         const cancelButton = document.getElementById('cancel-button');
         const resultsSection = document.getElementById('results-section');
         const progressBar = document.getElementById('progress-bar');
         const progressText = document.getElementById('progress-text');
         const resultsContainer = document.getElementById('results-container');
-        let eventSource; // Keep a reference to close it
+        let eventSource;
 
         form.addEventListener('submit', function(e) {
             e.preventDefault();
             
-            formFieldset.disabled = true; // Disable the form
+            formFieldset.disabled = true;
             resultsSection.style.display = 'block';
             resultsContainer.innerHTML = '';
-            progressText.textContent = 'Uploading file and starting process...';
+            progressText.textContent = 'Starting process...';
             progressBar.removeAttribute('value');
 
-            // Construct form data for GET request (works better with streaming)
-            const formData = new FormData(form);
-            const params = new URLSearchParams();
-            for (const pair of formData) {
-                // Handle multiple checkboxes with the same name
-                if (params.has(pair[0])) { params.append(pair[0], pair[1]); }
-                else { params.set(pair[0], pair[1]); }
-            }
-            
-            // We need to send the file separately via POST
-            const fileData = new FormData();
-            fileData.append('pdf_file', fileInput.files[0]);
-
-            // First, upload the file, then start listening for events
-            fetch(`/process?${params.toString()}`, {
+            // Use fetch to POST the form data directly to the streaming endpoint
+            fetch('/process', {
                 method: 'POST',
-                body: fileData
+                body: new FormData(form)
             }).then(response => {
-                const streamUrl = response.headers.get('X-Stream-Location');
-                if (streamUrl) {
-                    eventSource = new EventSource(streamUrl);
-                    
-                    eventSource.onmessage = function(event) {
-                        const data = JSON.parse(event.data);
-                        progressBar.setAttribute('value', data.progress);
-                        progressBar.setAttribute('max', data.total);
-                        progressText.textContent = data.message;
-                    };
+                // The body of the response is our event stream
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
 
-                    eventSource.addEventListener('complete', function(event) {
-                        resultsContainer.innerHTML = event.data;
-                        progressText.textContent = 'All tasks complete.';
-                        eventSource.close();
-                        formFieldset.disabled = false; // Re-enable form
-                    });
+                // Function to process the stream
+                function processStream() {
+                    reader.read().then(({ done, value }) => {
+                        if (done) { return; }
+                        
+                        // Decode and process the chunk of data
+                        const chunk = decoder.decode(value, { stream: true });
+                        const events = chunk.split('\n\n');
 
-                    eventSource.addEventListener('error', function(event) {
-                        resultsContainer.innerHTML = `<p style="color:red;"><strong>Error:</strong> ${event.data}</p>`;
-                        progressText.textContent = 'Failed.';
-                        progressBar.setAttribute('value', '0');
-                        eventSource.close();
-                        formFieldset.disabled = false; // Re-enable form
+                        events.forEach(eventData => {
+                            if (!eventData.trim()) return;
+                            
+                            let eventType = 'message';
+                            let data = eventData;
+                            
+                            if (eventData.startsWith('event: ')) {
+                                eventType = eventData.split('\n')[0].substring(7).trim();
+                                data = eventData.substring(eventData.indexOf('\n') + 1);
+                            }
+                            if (data.startsWith('data: ')) {
+                                data = data.substring(6).trim();
+                            }
+                            
+                            // Manually dispatch events
+                            if (eventType === 'message') {
+                                const jsonData = JSON.parse(data);
+                                progressBar.setAttribute('value', jsonData.progress);
+                                progressBar.setAttribute('max', jsonData.total);
+                                progressText.textContent = jsonData.message;
+                            } else if (eventType === 'complete') {
+                                resultsContainer.innerHTML = data;
+                                progressText.textContent = 'All tasks complete.';
+                                formFieldset.disabled = false;
+                            } else if (eventType === 'error') {
+                                resultsContainer.innerHTML = `<p style="color:red;"><strong>Error:</strong> ${data}</p>`;
+                                progressText.textContent = 'Failed.';
+                                progressBar.setAttribute('value', '0');
+                                formFieldset.disabled = false;
+                            }
+                        });
+
+                        processStream(); // Continue reading the stream
                     });
                 }
-            }).catch(error => {
+                processStream();
+            }).catch(err => {
                 resultsContainer.innerHTML = `<p style="color:red;">A connection error occurred. Please try again.</p>`;
-                formFieldset.disabled = false; // Re-enable form
+                formFieldset.disabled = false;
             });
         });
 
         cancelButton.addEventListener('click', function() {
-            if (eventSource) {
-                eventSource.close();
-                progressText.textContent = 'Process canceled by user.';
-                resultsContainer.innerHTML = '';
-                formFieldset.disabled = false;
-            }
+            // Canceling fetch streams is complex, a simple page reload is the most robust way
+            location.reload(); 
         });
     </script>
 </body>
