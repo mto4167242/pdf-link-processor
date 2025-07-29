@@ -1,89 +1,94 @@
-# --- FILE: processing.py ---
+# --- FILE: processing.py (Final Version with Your Original Validation Logic) ---
 
 import fitz
 import pandas as pd
 import aiohttp
 import asyncio
 import os
-import time
 
 async def check_link(session, url, keywords):
-    # This function is correct and does not change
-    if not url.startswith(('http://', 'https://')): return {"valid": True, "status_code": "N/A", "reason": "Non-HTTP Link"}
+    """
+    This function mirrors the logic from your original script.
+    A link is ONLY invalid if a keyword is found or a connection error occurs.
+    """
+    if not url.startswith(('http://', 'https://')):
+        return {"valid": True, "status_code": "N/A", "reason": "Non-HTTP Link"}
+    
     try:
         async with session.get(url, timeout=20, ssl=False) as response:
-            status_code = response.status; text = await response.text(); text_lc = text.lower()
+            status_code = response.status
+            text = await response.text()
+            text_lc = text.lower()
+            
             for keyword in keywords:
-                if keyword in text_lc: return {"valid": False, "status_code": status_code, "reason": "Matched Keyword"}
+                if keyword in text_lc:
+                    return {"valid": False, "status_code": status_code, "reason": "Matched Keyword"}
+            
+            # If no keywords found, the link is VALID, eliminating false positives.
             return {"valid": True, "status_code": status_code, "reason": "OK"}
-    except Exception as e: return {"valid": False, "status_code": "Error", "reason": f"{type(e).__name__}"}
-
-async def check_link_with_semaphore(sem, session, url, keywords):
-    async with sem: return await check_link(session, url, keywords)
-
-# --- THIS IS THE MAJOR CHANGE ---
-async def run_link_check_stream(pdf_path, keywords):
-    """
-    This is now a generator function that yields progress updates.
-    """
-    start_time = time.time()
-    try: doc = fitz.open(pdf_path)
+            
     except Exception as e:
-        yield f"event: error\ndata: Could not open '{os.path.basename(pdf_path)}'. It may be corrupt or password-protected.\n\n"
-        return
+        return {"valid": False, "status_code": "Error", "reason": f"{type(e).__name__}"}
+
+
+async def run_link_check(pdf_path, keywords):
+    try:
+        doc = fitz.open(pdf_path)
+    except Exception as e:
+        summary = {"status": "error", "message": f"Could not open '{os.path.basename(pdf_path)}'."}
+        return pd.DataFrame(), summary
 
     links_to_check = []
-    # This part is the same as before, gathering links
     for page_num, page in enumerate(doc):
         for link in page.get_links():
             link_info = {"page": page_num + 1, "url": link.get("uri"), "anchor_text": ""}
             try:
                 if link.get('from'): link_info["anchor_text"] = page.get_textbox(link['from'])
-            except: pass
-            if link.get('kind') == fitz.LINK_GOTO: link_info.update({"url": f"Internal -> Page {link.get('page', 0) + 1}", "link_type": "Internal"})
-            elif link.get('kind') == fitz.LINK_URI: link_info.update({"link_type": "External"})
+            except Exception: pass
+            if link.get('kind') == fitz.LINK_GOTO:
+                link_info.update({"url": f"Internal -> Page {link.get('page', 0) + 1}", "link_type": "Internal"})
+            elif link.get('kind') == fitz.LINK_URI:
+                link_info.update({"link_type": "External"})
             links_to_check.append(link_info)
 
     if not links_to_check:
-        yield f"event: complete\ndata: <article><h4>Results for {os.path.basename(doc.name)}</h4><p>No hyperlinks were found in this PDF.</p></article>\n\n"
-        return
+        summary = {"status": "no_links", "message": f"PDF '{os.path.basename(doc.name)}' has no hyperlinks."}
+        return pd.DataFrame(), summary
 
-    # First, yield the total number of links so the progress bar can be set
-    total_links = len(links_to_check)
-    yield f"data: {{\"progress\": 0, \"total\": {total_links}, \"message\": \"Found {total_links} links. Starting checks...\"}}\n\n"
-
-    # Now, process and yield progress for each link
     http_links = [l for l in links_to_check if l.get('link_type') == 'External' and l.get('url', '').startswith('http')]
     other_links = [l for l in links_to_check if l not in http_links]
     
-    all_results = []
-    progress = 0
+    results = []
     if http_links:
-        sem = asyncio.Semaphore(15); connector = aiohttp.TCPConnector(ssl=False)
+        # Use a semaphore for stability on Render
+        sem = asyncio.Semaphore(15)
+        connector = aiohttp.TCPConnector(ssl=False)
+        async def check_link_with_semaphore(session, url, keywords):
+            async with sem:
+                return await check_link(session, url, keywords)
+        
         async with aiohttp.ClientSession(connector=connector) as session:
-            for i, item in enumerate(http_links):
-                response = await check_link_with_semaphore(sem, session, item["url"], keywords)
-                all_results.append({**item, **response})
-                progress += 1
-                message = f"Checked {progress}/{total_links}: {item['url']}"
-                yield f"data: {{\"progress\": {progress}, \"total\": {total_links}, \"message\": \"{message}\"}}\n\n"
+            tasks = [check_link_with_semaphore(session, item["url"], keywords) for item in http_links]
+            responses = await asyncio.gather(*tasks)
+            for i, item in enumerate(http_links): results.append({**item, **responses[i]})
     
-    for item in other_links:
-        all_results.append({**item, "valid": True, "status_code": "N/A", "reason": "Internal or Non-HTTP Link"})
-        progress += 1
-        message = f"Processed {progress}/{total_links}: {item['url']}"
-        yield f"data: {{\"progress\": {progress}, \"total\": {total_links}, \"message\": \"{message}\"}}\n\n"
-
-    df = pd.DataFrame(all_results)
+    for item in other_links: results.append({**item, "valid": True, "status_code": "N/A", "reason": "Internal or Non-HTTP Link"})
+    df = pd.DataFrame(results).sort_values(by="page").reset_index(drop=True)
     
-    # After all links are checked, we yield a "final_data" event with the complete dataframe
-    # This is a bit of a trick to pass the full dataset to the Flask app after the stream
-    end_time = time.time()
-    total_time = round(end_time - start_time, 2)
-    df_json = df.to_json(orient='split')
-    yield f"event: final_data\ndata: {{\"dataframe\": {df_json}, \"total_time\": {total_time}}}\n\n"
+    invalid_count = len(df) - int(df['valid'].sum())
+    summary = {
+        "status": "success", "message": f"Checked {len(df)} links. Found {invalid_count} invalid links." if invalid_count > 0 else f"All {len(df)} links are valid!",
+        "filename": os.path.basename(doc.name), "total_pages": len(doc), "total_links": len(df),
+        "valid_links": int(df['valid'].sum()), "invalid_links": invalid_count,
+        "error_breakdown": df[df['valid'] == False]['reason'].value_counts().to_dict() if invalid_count > 0 else {}
+    }
+    all_cols = ['page', 'anchor_text', 'url', 'valid', 'status_code', 'reason', 'link_type']
+    for col in all_cols:
+        if col not in df.columns: df[col] = pd.NA
+    df = df[all_cols]
+    return df, summary
 
-# The other helper functions remain the same.
+# The helper functions (create_highlighted_pdf, etc.) are correct and do not need to be changed.
 def create_highlighted_pdf(source_pdf_path, output_pdf_path, invalid_links, color_name="Yellow"):
     COLOR_MAP = {"Yellow": (1, 1, 0), "Pink": (1, 0.7, 0.8), "Green": (0.5, 1, 0.5), "Blue": (0.7, 0.8, 1)}
     highlight_color = COLOR_MAP.get(color_name, (1, 1, 0))
@@ -91,17 +96,18 @@ def create_highlighted_pdf(source_pdf_path, output_pdf_path, invalid_links, colo
     for page in doc:
         for link in page.get_links():
              if link.get("kind") == fitz.LINK_URI and link.get("uri") in target_links:
-                try: highlight = page.add_highlight_annot(link["from"]); highlight.set_colors(stroke=highlight_color); highlight.update()
+                try:
+                    highlight = page.add_highlight_annot(link["from"]); highlight.set_colors(stroke=highlight_color); highlight.update()
                 except: pass
     doc.save(output_pdf_path); return True
 
 def extract_final_pdf(source_path, output_path, sort_by_count=False):
     doc = fitz.open(source_path); pages_to_extract = []
     for i, page in enumerate(doc):
-        highlight_count = 0
+        count = 0
         for annot in page.annots():
-            if annot.type[0] == 8: highlight_count += 1
-        if highlight_count > 0: pages_to_extract.append({"page_num": i, "count": highlight_count})
+            if annot.type[0] == 8: count += 1
+        if count > 0: pages_to_extract.append({"page_num": i, "count": count})
     if not pages_to_extract: return 0
     if sort_by_count: pages_to_extract.sort(key=lambda p: p["count"], reverse=True)
     new_doc = fitz.open()
