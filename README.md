@@ -10,10 +10,6 @@ This tool is built with a Python Flask backend and a modern, responsive HTML/CSS
 
 
 
-!\[Screenshot of the PDF Link Processor](https://i.imgur.com/K3tA7hE.png) 
-
-\*(Feel free to replace this with your own screenshot!)\*
-
 
 
 ---
@@ -204,10 +200,6 @@ Generated code
 ├── requirements.txt        # List of all Python package dependencies
 
 └── README.md               # This file
-
-
-
-This README is a huge improvement because it not only tells users \*how\* to run the app but also \*what\* it is, \*what it does\*, and \*how it's built\*. It's a proper introduction for anyone who stumbles upon your project folder.
 
 
 
